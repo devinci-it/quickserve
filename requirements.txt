@@ -1,0 +1,4 @@
+# Dependencies for QuickServe app
+
+argparse 
+netifaces
