@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import ssl
 import http.server
@@ -6,199 +7,225 @@ import signal
 import sys
 import argparse
 import shutil
-import time
 import socket
-import netifaces  # To fetch IP addresses for all network interfaces
+import subprocess
+import netifaces
+from utility import Loader
 
-# Global flag to handle clean-up confirmation
+# =========================
+# Globals & ANSI
+# =========================
+
 should_cleanup = False
 
-# Function to clear the terminal screen (used only at the start)
-def clear_screen():
-    """Clear the terminal screen based on the OS (Windows or UNIX-based)."""
-    os.system('cls' if os.name == 'nt' else 'clear')
+BOLD  = "\033[1m"
+RESET = "\033[0m"
+INFO  = "\033[1;34m"   # [i]
+LINK  = "\033[1;90m"   # gray
+CYAN  = "\033[96m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
 
-# Function to get the terminal height
+# =========================
+# UI Helpers
+# =========================
+
+def clear_screen():
+    os.system("cls" if os.name == "nt" else "clear")
+
+
 def get_terminal_height():
-    """Get the height of the terminal screen."""
     try:
         return shutil.get_terminal_size().lines
-    except AttributeError:
-        # If the terminal doesn't support this method, default to 24 lines
+    except Exception:
         return 24
 
-# Function to print the server information
+
+def print_banner():
+    banner = r"""
+                _____      ______                                 
+    ______ ____  ____(_)________  /_______________________   ______ 
+    _  __ `/  / / /_  /_  ___/_  //_/_  ___/  _ \_  ___/_ | / /  _ \
+    / /_/ // /_/ /_  / / /__ _  ,<  _(__  )/  __/  /   __ |/ //  __/
+    \__, / \__,_/ /_/  \___/ /_/|_| /____/ \___//_/    _____/ \___/ 
+     /_/                                                           
+"""
+    print(f"\033[1;96m{banner}{RESET}")
+
+
+def print_line():
+    print(f"{LINK}{'_' * 76}{RESET}")
+
+# =========================
+# Network Helpers
+# =========================
+
+def _local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def get_access_links(bind, secure=False):
+    scheme = "https" if secure else "http"
+    links = []
+
+    if bind.startswith(("http://", "https://")):
+        return [bind]
+
+    if ":" in bind and bind.replace(".", "").replace(":", "").isdigit():
+        ip, port = bind.split(":", 1)
+        if ip == "0.0.0.0":
+            links.extend([
+                f"{scheme}://127.0.0.1:{port}",
+                f"{scheme}://{_local_ip()}:{port}"
+            ])
+        else:
+            links.append(f"{scheme}://{ip}:{port}")
+        return links
+
+    if bind.isdigit():
+        links.extend([
+            f"{scheme}://127.0.0.1:{bind}",
+            f"{scheme}://{_local_ip()}:{bind}"
+        ])
+
+    return links
+
+
+def print_access_links(bind, secure=False):
+    links = get_access_links(bind, secure)
+
+    if not links:
+        print(f"\n{INFO}[i]{RESET} {BOLD}No valid access links found{RESET}")
+        return
+
+    print(f"\n{INFO}[i]{RESET} {BOLD}Web interface available at:{RESET}")
+    for url in links:
+        print(f"    {LINK}{url}{RESET}")
+    print_line()
+
+
+# =========================
+# Server Info
+# =========================
+
 def print_server_info(directory, host, port, secure):
-    """Print information about the server being started."""
-    terminal_height = get_terminal_height()  # Get the terminal height
-    banner_height = 6  # Set a height for the banner (adjustable)
+    abs_directory = os.path.abspath(directory)
+    print_line()
+    print(f"\n{INFO}[i]{RESET} {BOLD}Server Information:{RESET}")
+    print(BOLD + f"  {'Root Dir':<10}:{GREEN}{abs_directory}{RESET}")
+    print(BOLD + f"  {'Address':<10}: {YELLOW}{host}:{port}{RESET}")
+    print(BOLD + f"  {'Secure':<10}: {'Yes' if secure else 'No'}{RESET}")
+    print_line()
 
-    # Print the sticky banner (will be at the bottom of the terminal)
-    print("=" * 40)
-    print(f" QuickServe - Serving directory: {directory}")
-    print(f" Address: {host}:{port}")
-    print(f" Secure: {'Yes' if secure else 'No'}")
-    print("=" * 40)
-    print(" URI Endpoints:")
-    print(f" - / (root directory: {directory})")
-    print("=" * 40)
+    return get_terminal_height() - 14
 
-    # Return remaining space for log content
-    return terminal_height - banner_height
+# =========================
+# SSL
+# =========================
 
-# Function to create disposable certificates if required for SSL
 def create_disposable_certificates():
-    """Create temporary self-signed certificates for HTTPS."""
-    # Get the directory where the script is located
     script_dir = os.path.dirname(os.path.abspath(__file__))
     cert_dir = os.path.join(script_dir, "certs")
+    os.makedirs(cert_dir, exist_ok=True)
 
-    if not os.path.exists(cert_dir):
-        os.makedirs(cert_dir)
+    key_path = os.path.join(cert_dir, "server.key")
+    crt_path = os.path.join(cert_dir, "server.crt")
 
-    # Create a temporary self-signed certificate and key in the script's directory
-    os.system(f"openssl req -x509 -newkey rsa:4096 -keyout {cert_dir}/server.key -out {cert_dir}/server.crt -days 365 -nodes -subj '/CN=localhost'")
+    loader = Loader(interval=0.2)
+    loader.start("[i] Generating SSL certificate ")
 
-# Function to get the local IP addresses of the system
-def get_local_ip_addresses():
-    """Get a list of local IP addresses from network interfaces."""
-    ip_addresses = []
-    for interface in netifaces.interfaces():
-        try:
-            # Get the interface's addresses
-            addrs = netifaces.ifaddresses(interface)
-            # Look for IPv4 addresses
-            if netifaces.AF_INET in addrs:
-                for addr in addrs[netifaces.AF_INET]:
-                    ip_addresses.append(addr['addr'])
-        except ValueError:
-            continue
-    return ip_addresses
+    subprocess.run([
+        "openssl", "req", "-x509", "-newkey", "rsa:4096",
+        "-keyout", key_path,
+        "-out", crt_path,
+        "-days", "365",
+        "-nodes",
+        "-subj", "/CN=localhost"
+    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-# Function to handle starting the HTTP/HTTPS server
+    loader.stop()
+    print(f"{INFO}[i]{RESET} Certificate created:")
+    print(f"    {crt_path}")
+    print(f"    {key_path}")
+
+# =========================
+# Server
+# =========================
+
 def run_http_server(directory, host, port, secure):
-    """Start the HTTP/HTTPS server with the given parameters."""
-    # Print server info (clear screen and display settings)
-    log_height = print_server_info(directory, host, port, secure)
+    print_server_info(directory, host, port, secure)
 
-    # Create a simple HTTP request handler
     handler = http.server.SimpleHTTPRequestHandler
-    handler.directory = directory  # Set the directory to be served
+    handler.directory = directory
 
-    if host == "0.0.0.0":
-        # If the host is 0.0.0.0, print the local IP addresses
-        print("\nAvailable IP addresses:")
-        ip_addresses = get_local_ip_addresses()
-        for ip in ip_addresses:
-            print(f" - {ip}")
-        print("=" * 40)
+    httpd = socketserver.TCPServer((host, port), handler)
 
-    try:
-        if secure:
-            # Setup SSL for HTTPS if secure flag is true
-            print("Setting up HTTPS...")
-            httpd = socketserver.TCPServer((host, port), handler)
+    if secure:
+        cert_dir = os.path.join(os.path.dirname(__file__), "certs")
+        context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        context.load_cert_chain(
+            os.path.join(cert_dir, "server.crt"),
+            os.path.join(cert_dir, "server.key")
+        )
+        httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
 
-            # Set up SSL context and load the certificate and key
-            cert_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs")
-            context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-            context.load_cert_chain(certfile=os.path.join(cert_dir, "server.crt"), keyfile=os.path.join(cert_dir, "server.key"))
+    print_access_links(f"{host}:{port}", secure)
+    print(f"{GREEN} [✓]{RESET} {BOLD}Server running — Ctrl+C to stop{RESET}")
 
-            # Wrap the server socket with SSL (secure connection)
-            httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+    httpd.serve_forever()
 
-            print("Server running with SSL (HTTPS)...")
-        else:
-            # Non-SSL version (HTTP)
-            print("Setting up HTTP...")
-            httpd = socketserver.TCPServer((host, port), handler)
-            print("Server running without SSL (HTTP)...")
+# =========================
+# Cleanup & Signals
+# =========================
 
-        # Starting the server
-        print(f"Starting server on {host}:{port}...")
-        httpd.serve_forever()  # Use serve_forever to keep the server running
-
-    except Exception as e:
-        print(f"Error starting the server: {e}")
-
-# Handle cleanup on exit (whether Ctrl+C, Esc, or other signals)
 def handle_cleanup():
-    """Perform clean-up tasks like removing disposable certificates."""
-    global should_cleanup
+    cert_dir = os.path.join(os.path.dirname(__file__), "certs")
+    if os.path.exists(cert_dir):
+        shutil.rmtree(cert_dir)
+        print(f"{INFO}[i]{RESET} Certificates cleaned up")
+    sys.exit(0)
 
-    # If flagged for clean-up, proceed to delete the certs
-    if should_cleanup:
-        print("\nCleaning up generated certificates...")
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        cert_dir = os.path.join(script_dir, "certs")
 
-        if os.path.exists(os.path.join(cert_dir, "server.crt")):
-            os.remove(os.path.join(cert_dir, "server.crt"))
-        if os.path.exists(os.path.join(cert_dir, "server.key")):
-            os.remove(os.path.join(cert_dir, "server.key"))
-        print("Clean-up complete!")
-    else:
-        # Prompt user to confirm clean-up
-        confirm = input("Do you want to clean up generated files (certs)? [y/N]: ")
-        if confirm.lower() == 'y':
-            print("\nCleaning up generated certificates...")
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            cert_dir = os.path.join(script_dir, "certs")
-
-            if os.path.exists(os.path.join(cert_dir, "server.crt")):
-                os.remove(os.path.join(cert_dir, "server.crt"))
-            if os.path.exists(os.path.join(cert_dir, "server.key")):
-                os.remove(os.path.join(cert_dir, "server.key"))
-            print("Clean-up complete!")
-        else:
-            print("No clean-up performed.")
-
-    sys.exit(0)  # Exit the program after cleanup
-
-# Function to handle signal interruptions (Ctrl+C, Esc, etc.)
 def signal_handler(sig, frame):
-    """Handle interruption signals (e.g., Ctrl+C or Esc)."""
-    global should_cleanup
-    print("\nCaught Ctrl+C or Esc - Preparing for cleanup.")
-    should_cleanup = True
+    print(f"\n{INFO}[i]{RESET} Shutting down…")
     handle_cleanup()
 
-# Function to handle user suspending the process (Ctrl+Z)
-def suspend_handler(sig, frame):
-    """Handle suspend signal (Ctrl+Z) to inform the user."""
-    print("\nProcess suspended (Ctrl+Z). Press 'fg' to resume.")
-    print("You can exit the program and clean up after resuming.")
-    signal.signal(signal.SIGTSTP, signal.SIG_IGN)  # Ignore further suspend signals
+# =========================
+# CLI
+# =========================
 
-# Setup command-line argument parsing
 def parse_arguments():
-    """Parse and return command-line arguments."""
-    parser = argparse.ArgumentParser(description="QuickServe: Temporary HTTPS server")
-    parser.add_argument("directory", help="Path to the directory to serve")
-    parser.add_argument("host", help="Host address (e.g., 'localhost')")
-    parser.add_argument("port", type=int, help="Port number (e.g., 8000)")
-    parser.add_argument("--secure", "-s", action="store_true", help="Enable HTTPS (SSL)")
-    return parser.parse_args()
+    p = argparse.ArgumentParser(description="QuickServe – Temporary HTTP/HTTPS server")
+    p.add_argument("directory")
+    p.add_argument("host")
+    p.add_argument("port", type=int)
+    p.add_argument("-s", "--secure", action="store_true")
+    return p.parse_args()
 
-# Main function to run the app
+# =========================
+# Entry
+# =========================
+
 def main():
-    """Main entry point for the script to start the server."""
-    # Parse command-line arguments
     args = parse_arguments()
 
-    # Create certificates if SSL is enabled
     if args.secure:
         create_disposable_certificates()
 
-    # Set up signal handlers for clean exits (Ctrl+C, Esc, Ctrl+Z)
-    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
-    signal.signal(signal.SIGTERM, signal_handler)  # Exit signal
-    signal.signal(signal.SIGTSTP, suspend_handler)  # Ctrl+Z (suspend)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
-    # Run the server with the provided arguments
     run_http_server(args.directory, args.host, args.port, args.secure)
 
-# Entry point
-if __name__ == "__main__":
-    main()
 
+if __name__ == "__main__":
+    clear_screen()
+    print_banner()
+    main()

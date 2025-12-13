@@ -2,4 +2,6 @@ certs/*.pem
 certs/*.crt
 certs/*.key
 env/
+*.crt
+*.key
 

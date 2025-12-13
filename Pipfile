@@ -1,0 +1,41 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+argparse = "*"
+netifaces = "*"
+
+[dev-packages]
+
+[requires]
+python_version = "3.13"
+python_full_version = "3.13.5"
+
+[scripts]
+setup = """
+bash -c '
+echo "Upgrading pip..." &&
+python -m pip install --upgrade pip &&
+echo "Installing requirements..." &&
+[ -f requirements.txt ] && python -m pip install -r requirements.txt || echo "No requirements.txt found" &&
+echo "Installing build tools..." &&
+python -m pip install wheel setuptools build &&
+echo "Setup complete!"
+'
+"""
+
+rebuild = """
+bash -c '
+PACKAGE_NAME=$(python setup.py --name) &&
+echo "Uninstalling current package $PACKAGE_NAME..." &&
+pip uninstall -y $PACKAGE_NAME || echo "Package not installed" &&
+echo "Removing build directories..." &&
+rm -rf build/ dist/ *.egg-info ||
+echo "No build directories found" &&
+echo "Rebuilding package..." &&
+python -m build &&
+echo "Rebuild complete!"
+'
+"""
