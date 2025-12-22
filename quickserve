@@ -158,13 +158,14 @@ def create_disposable_certificates():
 # =========================
 # Server
 # =========================
+
 def run_http_server(directory, host, port, secure):
     print_server_info(directory, host, port, secure)
 
-    def handler_factory(*args, **kwargs):
-        return http.server.SimpleHTTPRequestHandler(*args, directory=directory, **kwargs)
+    handler = http.server.SimpleHTTPRequestHandler
+    handler.directory = directory
 
-    httpd = socketserver.TCPServer((host, port), handler_factory)
+    httpd = socketserver.TCPServer((host, port), handler)
 
     if secure:
         cert_dir = os.path.join(os.path.dirname(__file__), "certs")
@@ -176,10 +177,9 @@ def run_http_server(directory, host, port, secure):
         httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
 
     print_access_links(f"{host}:{port}", secure)
-    print(f"{GREEN} [✓]{RESET} {BOLD}Server running — Ctrl+C to stop{RESET}\n")
+    print(f"{GREEN} [✓]{RESET} {BOLD}Server running — Ctrl+C to stop{RESET}")
 
     httpd.serve_forever()
-
 
 # =========================
 # Cleanup & Signals
